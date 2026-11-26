@@ -1,0 +1,19 @@
+# Source patterns for Phrase Gen, embedded into dsp.so at build time.
+#
+# One MIDI file per line, relative to this directory, in the order they are
+# numbered on the device (Source 1 = first line).  An optional second column
+# is the 16th-note step to start reading from (default 0), so a longer file
+# can contribute any 8-step window:
+#
+#     my_long_riff.mid   16      <- steps 17..24 of that file
+#
+# Rename, add or remove lines freely (1..16 files), then rebuild.
+# If this file is deleted, every *.mid in this directory is used, sorted.
+#
+# pattern01..06 are copies of midi1..6.mid (E:\Projects\AI\MIDI260923).
+pattern01.mid
+pattern02.mid
+pattern03.mid
+pattern04.mid
+pattern05.mid
+pattern06.mid

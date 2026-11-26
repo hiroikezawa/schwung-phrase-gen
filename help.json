@@ -1,0 +1,134 @@
+{
+  "title": "Phrase Gen",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "Plays an 8-step",
+        "phrase of 16th",
+        "notes in C Phrygian,",
+        "in time with Move.",
+        "",
+        "Press a pad and it",
+        "writes a new phrase",
+        "in the style of six",
+        "built-in MIDI",
+        "patterns.",
+        "",
+        "Put it before a",
+        "synth and press",
+        "Play on Move."
+      ]
+    },
+    {
+      "title": "Pads",
+      "lines": [
+        "With this screen",
+        "open, every pad is",
+        "a GENERATE button",
+        "and the pads play",
+        "an animation.",
+        "",
+        "Pads do not reach",
+        "Move while the",
+        "screen is open.",
+        "",
+        "Close the screen",
+        "and the pads are",
+        "Move's again. Then",
+        "Trigger decides",
+        "which pad generates."
+      ]
+    },
+    {
+      "title": "Animation",
+      "lines": [
+        "Knob 5 picks it:",
+        "",
+        "Ripple: rings from",
+        "the centre. A press",
+        "throws one from",
+        "that pad.",
+        "",
+        "Snake: it hunts",
+        "food. A press drops",
+        "food there.",
+        "",
+        "Invade: aliens",
+        "march down. A press",
+        "fires from there.",
+        "",
+        "Auto: changes every",
+        "15 seconds."
+      ]
+    },
+    {
+      "title": "Controls",
+      "lines": [
+        "Knob 1: Mutation",
+        " 0 = pattern as is",
+        " 100 = bold changes",
+        "Knob 2: Trigger",
+        " any, note, learn",
+        "Knob 3: Trig Note",
+        " the GENERATE pad",
+        " (screen closed)",
+        "Knob 4: Source",
+        " random, or 1-6",
+        "Knob 5: Animation",
+        " auto, ripple,",
+        " snake, invade",
+        "",
+        "Touch a knob to see",
+        "it big."
+      ]
+    },
+    {
+      "title": "Generate",
+      "lines": [
+        "A pad press does",
+        "not play a note. It",
+        "writes a new phrase,",
+        "which starts at the",
+        "top of the next",
+        "8 steps, so the",
+        "groove never skips.",
+        "",
+        "Press again before",
+        "then and the newest",
+        "phrase wins."
+      ]
+    },
+    {
+      "title": "Trigger",
+      "lines": [
+        "Any: every pad is",
+        "GENERATE.",
+        "",
+        "Note: only the pad",
+        "that sends Trig Note",
+        "generates. Other",
+        "pads play the synth",
+        "as usual.",
+        "",
+        "Learn: press the pad",
+        "you want. It becomes",
+        "Trig Note and the",
+        "mode turns to Note."
+      ]
+    },
+    {
+      "title": "Timing",
+      "lines": [
+        "Follows Move's",
+        "transport only.",
+        "Stopped means",
+        "silent: there is no",
+        "internal clock.",
+        "",
+        "Step 1 lands on the",
+        "bar and half bar."
+      ]
+    }
+  ]
+}

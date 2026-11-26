@@ -1,0 +1,62 @@
+{
+  "id": "phrase-gen",
+  "name": "Phrase Gen",
+  "author": "Hiro Ikezawa",
+  "abbrev": "PG",
+  "version": "0.4.0",
+  "description": "8-step C Phrygian phrase generator: each pad press writes a new phrase in the style of the bundled MIDI patterns; its screen turns every pad into a GENERATE button that plays an animation (ripple, snake, invaders)",
+  "component_type": "midi_fx",
+  "capabilities": {
+    "chainable": true,
+    "component_type": "midi_fx",
+    "midi_in": true,
+    "midi_out": true,
+    "chain_params": [
+      {
+        "key": "mutation",
+        "name": "Mutation",
+        "type": "int",
+        "min": 0,
+        "max": 100,
+        "step": 1,
+        "default": 50
+      },
+      {
+        "key": "trigger",
+        "name": "Trigger",
+        "type": "enum",
+        "options": [
+          "any",
+          "note",
+          "learn"
+        ],
+        "default": 0
+      },
+      {
+        "key": "trig_note",
+        "name": "Trig Note",
+        "type": "int",
+        "min": 0,
+        "max": 127,
+        "step": 1,
+        "default": 36
+      },
+      {
+        "key": "source",
+        "name": "Source",
+        "type": "enum",
+        "options": [
+          "random",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6"
+        ],
+        "default": 0
+      }
+    ]
+  },
+  "ui_chain": "ui_chain.js"
+}
