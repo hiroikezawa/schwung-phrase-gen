@@ -193,7 +193,7 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
     write_amxd(build_patcher(n), AMXD)
     shutil.copy2(JS, os.path.join(OUT_DIR, "phrase_gen_m4l.js"))
-    for doc in ("README.md",):
+    for doc in ("README.md", "README.ja.md"):
         shutil.copy2(os.path.join(HERE, doc), os.path.join(OUT_DIR, doc))
     print("Built:", AMXD)
 

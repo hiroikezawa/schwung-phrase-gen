@@ -1,223 +1,281 @@
-# Phrase Gen v0.2.0 — Schwung MIDI FX
+# Phrase Gen v0.4.0 — Schwung MIDI FX
 
-6本の元ネタMIDIを解析し、それらと「同じ人が作ったような」8ステップ（16分音符×8）の
-C Phrygianフレーズを、PADを押すたびに生成してMoveのテンポに同期してループ再生する
-Schwung用MIDI FXです。自前の音源は持たず、後段のSound Generatorへ Note On/Off を送ります。
+**English** | [日本語](README.ja.md)
 
-## 1. 利用しているSchwung APIと既存実装
+A Schwung MIDI FX that analyses six source MIDI files and, every time a pad is
+pressed, generates an 8-step (eight 1/16 notes) C Phrygian phrase that sounds
+"as if the same person wrote it", looping it in sync with Move's tempo. It has
+no sound of its own; it sends Note On/Off to the Sound Generator after it.
 
-| 項目 | 内容 | 参照した既存実装 |
+## 1. Schwung APIs used, and existing code consulted
+
+| Item | What | Existing code consulted |
 |---|---|---|
-| プラグインAPI | `midi_fx_api_v1_t`（`create_instance` / `process_midi` / `tick` / `set_param` / `get_param`）、エクスポートは `move_midi_fx_init` | `src/host/midi_fx_api_v1.h`、内蔵 `arp` / `chord` |
-| 読み込み | chainが `modules/midi_fx/<id>/dsp.so` を `dlopen` | `src/modules/chain/dsp/chain_midi.c` `v2_load_midi_fx_slot` |
-| 出力 | `tick()` が毎オーディオブロック（128 frames ≒ 2.9 ms）呼ばれ、返したメッセージは後段のMIDI FX → Synth へ流れる | `chain_midi.c` `v2_tick_midi_fx` |
-| テンポ同期 | `host->get_beat_position()`（Moveのcable-0トランスポートから24PPQNを補間した拍位置。停止中は負）。MoveのMIDI Clock Out設定に依存しない | `src/host/shadow_transport.c`、chain LFOのsync |
-| PAD入力 | Moveが PAD押下を「そのトラックのチャンネルのノート」に変換し、それがslotのMIDI FXの `process_midi` に届く（arpが押鍵を受け取るのと同じ経路） | `arp.c` |
-| パラメータUI | `module.json` の `ui_hierarchy`（ノブ割当）＋ `get_param("chain_params")`（メタデータ） | `arp` / `chord` の module.json |
-| 状態保存 | `get_param("state")` / `set_param("state")` のJSON（slot autosave / プリセット） | `chain_patch.c` |
-| 配布・導入 | 独立パッケージ `dist/phrase-gen-module.tar.gz` を Schwung Manager の Custom install（tarball）へ | 同リポジトリの `maniac` と同方式 |
+| Plugin API | `midi_fx_api_v1_t` (`create_instance` / `process_midi` / `tick` / `set_param` / `get_param`), exported as `move_midi_fx_init` | `src/host/midi_fx_api_v1.h`, the built-in `arp` / `chord` |
+| Loading | The chain `dlopen`s `modules/midi_fx/<id>/dsp.so` | `src/modules/chain/dsp/chain_midi.c` `v2_load_midi_fx_slot` |
+| Output | `tick()` is called every audio block (128 frames ≈ 2.9 ms); the messages it returns flow on to the next MIDI FX → Synth | `chain_midi.c` `v2_tick_midi_fx` |
+| Tempo sync | `host->get_beat_position()` (the beat position interpolated at 24 PPQN from Move's cable-0 transport; negative while stopped). Does not depend on Move's MIDI Clock Out setting | `src/host/shadow_transport.c`, the chain LFO's sync |
+| Pad input | Move turns a pad press into "a note on that track's channel", which reaches the slot's MIDI FX `process_midi` (the same path by which arp receives held keys) | `arp.c` |
+| Parameter UI | `ui_hierarchy` in `module.json` (knob assignment) + `get_param("chain_params")` (metadata) | `arp` / `chord` module.json |
+| Saved state | JSON through `get_param("state")` / `set_param("state")` (slot autosave / presets) | `chain_patch.c` |
+| Distribution | A separate package `dist/phrase-gen-module.tar.gz`, for Schwung Manager's Custom install (tarball) | A package separate from Schwung itself |
 
-**最重要の制約（`src/host/plugin_api_v1.h` 冒頭）**: MIDI FXの全エントリポイント
-（`create_instance` を含む）はSPIオーディオコールバック上で実行され、ファイルI/O・malloc・
-ログ出力が禁止です。そのため:
+**The most important constraint (top of `src/host/plugin_api_v1.h`)**: every
+MIDI FX entry point (including `create_instance`) runs on the SPI audio
+callback, where file I/O, malloc and logging are forbidden. Therefore:
 
-- MIDIファイルは **ビルド時にCの配列として `dsp.so` に埋め込み**、実行時はメモリ上のバイト列を
-  パースするだけにしています（`scripts/embed_patterns.py`）。
-- 解析・生成・再生はすべて固定長配列＋有界ループ。確保はインスタンス1個の `calloc` のみ（arpと同じ）。
-- 「デバッグログ」はデバイス上では出せないので、`get_param("debug")` で現在のフレーズを
-  同じ書式で返し、さらにPC用CLI（`phrase-gen-cli`）で同じエンジンの出力を確認できます。
+- The MIDI files are **embedded into `dsp.so` as C arrays at build time**; at run
+  time only an in-memory byte array is parsed (`scripts/embed_patterns.py`).
+- Analysis, generation and playback all use fixed-length arrays and bounded
+  loops. The only allocation is one `calloc` per instance (as in arp).
+- A "debug log" cannot be printed on the device, so `get_param("debug")` returns
+  the current phrase in the same format, and a PC CLI (`phrase-gen-cli`) shows
+  the output of the same engine.
 
-## 2. 実装方針
+## 2. Design
 
-### 生成アルゴリズム（「元パターン中心の変形」方式）
+### Generation algorithm ("variation centred on a source pattern")
 
-1. 6本から1本を選ぶ（直前と同じソースは1回だけ引き直し）。
-2. そのソースをコピーし、**Mutation**（0〜100%）に比例して以下を適用:
-   - **リズム（v0.1.1〜 既定: 休符なし）**: 全8ステップが必ず発音します。元ネタの休符
-     （pattern02 の6ステップ目）は生成前に Markov で音を埋め、ノートの削除・ずらしは行いません。
-     `pg_gen_params_t.allow_rests = 1` にすると v0.1.0 の動作（ノート数 = 元の数 ±(Mutation×2)、
-     削除は鳴りにくいステップから、追加は鳴りやすいステップから、nudge 少量）に戻ります。
-   - **ピッチ**（元ノートの約 20+60×Mutation %）: 次のどれか1つを重み付きで選択
-     - スケール上で ±1〜3 ステップ移動（上行/下行の比率は解析結果から）
-     - オクターブ ±（元ネタのオクターブ分布に寄せる。跳躍率が高いほど選ばれやすい）
-     - 直前ノートの同音連打
-     - Markov再サンプル（音名はスケール度数の遷移表、音域は音程差の分布から）
-   - **追加ノート**のピッチはMarkov、velocity/gateはソースの分布から。
-   - **Velocity** 微変化（±3〜17）、**Note Length** 変化（×0.5〜×2、確率 35%×Mutation）。
-3. 必ず **C Phrygian に量子化**し、元ネタ全体の音域（今回 C1〜Eb7）にオクターブ折り返し。
-4. 直前のフレーズ・ソースそのものと同一になったら作り直し（Mutation>0のとき）。
+1. Pick one of the six (if it repeats the previous source, draw again once).
+2. Copy that source and apply the following in proportion to **Mutation** (0–100 %):
+   - **Rhythm (from v0.1.1, default: no rests)**: all 8 steps always sound. Rests
+     in the source (step 6 of pattern02) are filled with a Markov note before
+     generation; notes are never deleted or shifted.
+     With `pg_gen_params_t.allow_rests = 1` it returns to the v0.1.0 behaviour
+     (note count = original ±(Mutation×2), deletions from the steps least likely
+     to sound, additions at the steps most likely to sound, a little nudge).
+   - **Pitch** (about 20+60×Mutation % of the original notes): one of these,
+     chosen with weights
+     - move ±1–3 steps along the scale (the up/down ratio comes from the analysis)
+     - octave ± (pulled towards the sources' octave distribution; chosen more
+       often the higher the leap rate)
+     - repeat the previous note
+     - Markov resample (pitch class from the scale-degree transition table,
+       register from the distribution of intervals)
+   - **Added notes** take a Markov pitch, and velocity/gate from the source's
+     distribution.
+   - Small **velocity** changes (±3–17) and **note length** changes (×0.5–×2,
+     probability 35 %×Mutation).
+3. Always **quantise to C Phrygian**, and fold by octaves into the sources'
+   overall range (C1–Eb7 here).
+4. If the result equals the previous phrase or the source itself, make it again
+   (when Mutation > 0).
 
-ソース単体の統計（重み0.6）と6本全体の統計（0.4）を混ぜるので、「そのソースの骨格＋他のソースの手癖」になります。
+The source's own statistics (weight 0.6) are mixed with those of all six (0.4),
+giving "that source's skeleton plus the habits of the others".
 
-解析する特徴（`pg_analyzer`）: 各ステップの発音確率（=休符位置）、ノート密度（平均/最小/最大）、
-ピッチクラス分布、オクターブ分布、音域、直前ノートからの音程差の分布、同音連打率、上行/下行率、
-オクターブ以上の跳躍率、スケール度数のMarkov遷移表、velocity分布（平均・平均偏差・範囲）、
-Note Length分布。
+Features analysed (`pg_analyzer`): the probability of each step sounding (= rest
+positions), note density (mean/min/max), pitch-class distribution, octave
+distribution, range, the distribution of intervals from the previous note, the
+repeated-note rate, the up/down ratio, the rate of leaps of an octave or more, a
+Markov transition table of scale degrees, the velocity distribution (mean, mean
+deviation, range) and the note-length distribution.
 
-**今回の6本の解析結果**（`phrase-gen-cli` 出力より）: ほぼ全ステップが発音（7〜8音/8ステップ）、
-休符は pattern02 の6ステップ目のみ、音程差の57%がオクターブ以上の跳躍、同音連打0%、
-上行64%/下行36%、velocityは全て100、長さは全て16分の92%。
+**Analysis of these six** (from `phrase-gen-cli` output): almost every step
+sounds (7–8 notes per 8 steps), the only rest is step 6 of pattern02, 57 % of
+intervals are leaps of an octave or more, 0 % repeated notes, 64 % up / 36 %
+down, every velocity 100, every length 92 % of a 1/16.
 
-**Mutation ごとの実測**（v0.1.1、各4000回平均）: 常に8音/8ステップ（休符なし）。
+**Measured per Mutation** (v0.1.1, mean of 4000 each): always 8 notes in 8
+steps (no rests).
 
-| Mutation | 元ノート維持 |
+| Mutation | Original notes kept |
 |---|---|
-| 0% | 100%（元MIDIの音そのまま。休符だった位置だけ埋める） |
-| 50%（既定） | 約50% |
-| 75% | 約34% |
-| 100% | 約20% |
+| 0% | 100 % (the original MIDI's notes as they are; only former rest positions are filled) |
+| 50% (default) | about 50 % |
+| 75% | about 34 % |
+| 100% | about 20 % |
 
-### 再生（`pg_sequencer`）
+### Playback (`pg_sequencer`)
 
-- 独自タイマーなし。毎ブロック `get_beat_position()` を読み、16分境界を跨いだらそのステップを発音。
-  ステップ番号はトランスポートの拍0基準なので、8ステップの頭は常に小節頭・半小節頭。
-- 新しいフレーズは **次の8ステップ境界で切り替え**（途中で押してもタイミングは崩れない）。
-  境界前に再度押したら最新のものが勝ちます。停止中に押した場合は即座に差し替え。
-- 停止中は無音（フリーランしない）。
-- ホストが `get_beat_position` を持たない場合のみ、`process_midi` に届く 0xF8 クロックで代替。
-- ジッタ: ノートオンは最大1ブロック（≈2.9 ms）遅れ。MIDI FXの出力にサンプルオフセットが無いための上限です。
+- No timer of its own. Every block reads `get_beat_position()` and plays a step
+  when a 1/16 boundary is crossed. Step numbers count from the transport's beat
+  0, so the start of the 8 steps is always on a bar or half-bar.
+- A new phrase **switches in at the next 8-step boundary** (pressing midway does
+  not disturb the timing). Pressing again before the boundary means the latest
+  wins. Pressing while stopped replaces it at once.
+- Silent while stopped (no free running).
+- Only when the host has no `get_beat_position` is the 0xF8 clock arriving at
+  `process_midi` used instead.
+- Jitter: a note-on can be up to one block (≈2.9 ms) late. That is the limit,
+  because MIDI FX output has no sample offset.
 
-### stuck note対策
+### Stuck-note protection
 
-- 発音ごとにボイス（音高・チャンネル・終了拍）を記録。停止・CC120/123・0xFC・トランスポートの巻き戻し
-  （停止を挟まないリスタート）で全ボイスを解放。
-- 同じ音高が鳴っている最中に再発音するときは必ず Off→On の順。
-- 出力バッファが一杯で送れなかったNote Offは「借り」として次のブロックで送る。
-- PADモード切替中に押しっぱなしのキーがあっても、そのキーのNote Offは Note On と同じ扱い
-  （通したOnのOffは必ず通す）。
+- Each note records its voice (pitch, channel, end beat). Stop, CC120/123, 0xFC
+  and a transport rewind (a restart without a stop in between) release every voice.
+- Re-sounding a pitch that is still playing always goes Off→On.
+- A Note Off that could not be sent because the output buffer was full is "owed"
+  and sent in the next block.
+- Even if a key is held through a PAD mode change, that key's Note Off is treated
+  like its Note On (the Off of an On that was passed is always passed).
 
-## 3. ファイル構成
+## 3. Files
 
 ```
 schwung-phrase-gen/
-  module.json            chain_params（DSPのノブ4つ）
-  ui_chain.js / ui_core.mjs  専用画面（パッド＝GENERATE、ノブ1〜5）
-  pad_anim.mjs           パッドのアニメーション（RIPPLE / SNAKE / INVADE）
-  help.json              デバイス上のヘルプ
+  module.json            chain_params (the DSP's four knobs)
+  ui_chain.js / ui_core.mjs  dedicated screen (pads = GENERATE, knobs 1–5)
+  pad_anim.mjs           pad animations (RIPPLE / SNAKE / INVADE)
+  help.json              on-device help
   patterns/
-    patterns.txt         使用するMIDIファイルの一覧と順番（ここを書き換えるだけで差し替え可）
-    pattern01..06.mid    元ネタ（Hiro Ikezawa 作の 6 つのフレーズ）
+    patterns.txt         list and order of the MIDI files used (edit only this to replace them)
+    pattern01..06.mid    sources (six phrases written by Hiro Ikezawa)
   dsp/
-    pg_pattern.h         共通型（ステップ/パターン）
-    pg_midi_loader.[ch]  MidiPatternLoader: SMFパース → 任意区間を8ステップへ抽出（2段階に分離）
-    pg_analyzer.[ch]     PatternAnalyzer: 上記の特徴を統計化
-    pg_generator.[ch]    PatternGenerator: ソース選択＋変形（rhythm / pitch / dynamics の各ステージ）
-    pg_scale.[ch]        ScaleQuantizer: root＋12bitマスク（今は C Phrygian）
-    pg_sequencer.[ch]    Sequencer: トランスポート同期再生、境界での差し替え、ボイス管理
-    pg_pad.[ch]          PadController: 入力ノート → GENERATE / 素通し / 破棄
-    pg_library.[ch]      Loader＋Analyzerの結線（プラグインとCLIで共通）
-    pg_format.[ch]       ノート名、デバッグ表示、state用エンコード
-    pg_rng.h             決定的乱数（xorshift32）と重み付き選択
-    phrase_gen.c         Schwung API との接着のみ（パラメータ、state）
+    pg_pattern.h         shared types (step/pattern)
+    pg_midi_loader.[ch]  MidiPatternLoader: SMF parse → any stretch extracted to 8 steps (two separate stages)
+    pg_analyzer.[ch]     PatternAnalyzer: statistics of the features above
+    pg_generator.[ch]    PatternGenerator: source choice + variation (rhythm / pitch / dynamics stages)
+    pg_scale.[ch]        ScaleQuantizer: root + 12-bit mask (C Phrygian for now)
+    pg_sequencer.[ch]    Sequencer: transport-synced playback, swaps at boundaries, voice management
+    pg_pad.[ch]          PadController: input note → GENERATE / pass through / drop
+    pg_library.[ch]      wiring of Loader + Analyzer (shared by the plugin and the CLI)
+    pg_format.[ch]       note names, debug display, encoding for state
+    pg_rng.h             deterministic RNG (xorshift32) and weighted choice
+    phrase_gen.c         only the glue to the Schwung API (parameters, state)
   scripts/
-    build.sh             native | arm64（既定）
-    embed_patterns.py    patterns/ → build/generated/pg_patterns_data.h（＋Source選択肢を件数に合わせる）
-    check_abi.py         AArch64・エクスポート・GLIBC≦2.34・RT禁止関数の不在を検査
-    test.sh              ネイティブビルド＋テスト一式
-    install.py           Schwung Manager の Custom install へアップロード
+    build.sh             native | arm64 (default)
+    embed_patterns.py    patterns/ → build/generated/pg_patterns_data.h (+ Source options sized to the file count)
+    check_abi.py         checks AArch64, exports, GLIBC ≤ 2.34 and the absence of RT-forbidden functions
+    test.sh              native build + the whole test suite
+    install.py           upload to Schwung Manager's Custom install
   tests/
-    test_phrase_gen.c    単体＋API経由の結合テスト（ASan/UBSan）
-    test_dlopen.c        ビルド済み dsp.so を chain と同じ方法で dlopen して駆動
+    test_phrase_gen.c    unit + integration tests through the API (ASan/UBSan)
+    test_dlopen.c        dlopens the built dsp.so the same way the chain does and drives it
   tools/
-    phrase_gen_cli.c     PC用: 解析結果と生成結果をデバッグ書式で表示
+    phrase_gen_cli.c     for the PC: prints analysis and generated results in the debug format
+  m4l/                   the Max for Live version (writes phrases into Live clips; see m4l/README.md)
+  third_party/schwung/   Schwung's plugin API headers (MIT)
 ```
 
-## 4. ビルド
+## 4. Building
 
-このリポジトリ内で（Linux/WSL、`gcc`、`aarch64-linux-gnu-gcc`、Python 3）:
+In this repository (Linux/WSL, `gcc`, `aarch64-linux-gnu-gcc`, Python 3, and
+Node.js for the UI test). Schwung's plugin API headers (MIT) are bundled in
+`third_party/schwung/`:
 
 ```bash
-bash scripts/test.sh          # ネイティブビルド＋全テスト
-bash scripts/build.sh arm64   # Move用パッケージ
+bash scripts/test.sh          # native build + all tests
+bash scripts/build.sh arm64   # package for Move
 ```
 
-成果物: `dist/phrase-gen-module.tar.gz`（このモジュール内）。本体の標準9モジュールや
-`scripts/build.sh` には加えていません（maniac と同じく独立パッケージ）。
+Output: `dist/phrase-gen-module.tar.gz`. It is not part of Schwung's own
+distribution and is provided as a separate package.
 
-## 5. インストール
+## 5. Installing
 
-Schwung導入済みのMoveへ、Managerの既存Custom install（tarball）で導入します。
+Install onto a Move with Schwung through the Manager's Custom install (tarball).
 
 ```bash
 python3 scripts/install.py http://move.local:7700 --check
 python3 scripts/install.py http://move.local:7700
 ```
 
-ブラウザで `http://<MoveのIP>:7700/modules` → Custom install → tarball で
-`phrase-gen-module.tar.gz` を選んでも同じです。`modules/midi_fx/phrase-gen/` に展開されます。
+Choosing `phrase-gen-module.tar.gz` in the browser at
+`http://<Move's IP>:7700/modules` → Custom install → tarball does the same. It
+unpacks to `modules/midi_fx/phrase-gen/`.
 
-## 6. Move上での操作
+## 6. Using it on Move
 
-1. 使うMoveトラック（例: Track 1）の MIDI Out を ch1 にし、Moveの内蔵音を鳴らしたくなければ
-   空のDrum Rack / Samplerプリセットを読み込む（Schwungの「Connecting Tracks」と同じ）。
-2. Shift＋Volumeノブに触れながら Track 1 を押して Schwung の Slot 1 を開く（Recv Ch = 1）。
-3. チェーンの MIDI FX 位置の **+** で **Phrase Gen** を選択、その後段の Synth に好きな音源を入れる。
-4. Moveの **Play** を押すと、初期フレーズ（6本のどれかのバリエーション）が8ステップでループ。
-5. Track 1 の **PADを押すたびに新しいフレーズ**が生成され、次の8ステップの頭から切り替わる。
+1. Set the MIDI Out of the Move track you use (e.g. Track 1) to ch1, and if you do
+   not want Move's built-in sound, load an empty Drum Rack / Sampler preset (as in
+   Schwung's "Connecting Tracks").
+2. Touch the Volume knob with Shift held and press Track 1 to open Schwung's
+   Slot 1 (Recv Ch = 1).
+3. Choose **Phrase Gen** with **+** at the chain's MIDI FX position, and put any
+   instrument in the Synth after it.
+4. Press **Play** on Move and the initial phrase (a variation of one of the six)
+   loops over 8 steps.
+5. **Every press of a Track 1 pad generates a new phrase**, which switches in at
+   the start of the next 8 steps.
 
-### Phrase Gen の画面（v0.2.0〜）
+### The Phrase Gen screen (from v0.2.0)
 
-チェーンで Phrase Gen を選んで開くと、標準のノブ画面の代わりに専用画面（`ui_chain.js`）が開きます。
+Choose Phrase Gen in the chain and open it, and a dedicated screen
+(`ui_chain.js`) opens instead of the standard knob screen.
 
-- 全32パッドが **GENERATE ボタン**になり、**パッド全体でアニメーション**します（v0.4.0〜、`pad_anim.mjs`）。
-  押したパッドは押している間だけ白。アニメーションはノブ5で選びます。
-  - **RIPPLE（放射状）**: 真ん中から色とりどりの輪が広がる。押したパッドからも輪が広がる。
-  - **SNAKE（スネークゲーム風）**: 白い頭のヘビが点滅するエサを追いかけ、食べた色で体が伸びる。
-    押したパッドにエサが置かれる。14マスまで伸びるか行き止まりになると赤く点滅して最初から。
-  - **INVADE（インベーダー風）**: 上の2段から敵が左右に動きながら降りてきて、最下段の白い砲台が自動で撃つ。
-    押したパッドの列に砲台が移って撃つ。全滅させると次のウェーブ、着地されると全体が赤く点滅して最初から。
-  - **AUTO（既定）**: 上の3つを15秒ごとに切り替え。
-  - 約12コマ/秒（80 ms）で動き、変化したパッドだけLEDを送ります。ノブ5の選択はUIだけの設定で、DSPには保存されません
-    （画面を開き直すと AUTO に戻ります）。
-- この画面が開いている間は `host_pad_block` でパッドを横取りするので、**Move本体（純正の音源・シーケンサ）にはパッドが届きません**。
-- 画面には再生中の8ステップ（音名、再生位置を反転表示）、次のフレーズが予約中なら右上に `NEXT`。
-- **制限（Schwungの仕様）**: パッドの横取りは Schwung の画面が表示されている間だけ有効です。
-  Back・Menu・トラック長押しなどで Move の画面に戻ると、shim が自動で解除し、パッドの色も Move のものに戻ります
-  （パッドが永久に効かなくなる事故を防ぐための設計で、モジュール側からは変えられません）。
-  画面を閉じている間は従来どおり、パッドは Move に届き、その音が Phrase Gen に届いて Trigger 設定に従って GENERATE します。
-- **Shift+パッドだけで操作する方式は不採用**（2026-10-01 に試作して取りやめ）: Shift は Move が自分で使うボタンで、
-  MIDI FX に届くノートには Shift の情報が無く、この画面以外（音源の画面・Move の画面）では実現できないため。
+- All 32 pads become **GENERATE buttons** and **animate across the whole pad
+  grid** (from v0.4.0, `pad_anim.mjs`). A pressed pad is white while held. Knob 5
+  chooses the animation.
+  - **RIPPLE (radial)**: colourful rings spread out from the centre. Rings also
+    spread from a pressed pad.
+  - **SNAKE (snake-game style)**: a snake with a white head chases blinking food
+    and grows in the colour it ate. Food is placed at a pressed pad. When it
+    reaches 14 cells or hits a dead end it flashes red and starts over.
+  - **INVADE (invader style)**: enemies come down from the top two rows moving
+    sideways, and a white cannon on the bottom row fires on its own. The cannon
+    moves to a pressed pad's column and fires. Clear them all for the next wave;
+    if they land, everything flashes red and it starts over.
+  - **AUTO (default)**: switches between the three every 15 s.
+  - It runs at about 12 frames a second (80 ms) and sends LEDs only for pads
+    that changed. Knob 5's choice is a UI-only setting and is not saved in the
+    DSP (reopening the screen returns to AUTO).
+- While this screen is open the pads are taken over with `host_pad_block`, so
+  **pad presses do not reach Move itself (its own instruments and sequencer)**.
+- The screen shows the 8 playing steps (note names, playback position inverted)
+  and `NEXT` at the top right when a next phrase is queued.
+- **Limitation (how Schwung works)**: taking over the pads works only while a
+  Schwung screen is shown. Going back to Move's screen with Back, Menu, a long
+  track press and so on makes the shim release it automatically, and the pad
+  colours return to Move's (a design that prevents the pads from being dead for
+  good; a module cannot change it). While the screen is closed the pads reach
+  Move as before, and their notes reach Phrase Gen, which GENERATEs according to
+  the Trigger setting.
+- **Operating with Shift+pad only was rejected** (prototyped and dropped on
+  2026-10-01): Shift is a button Move uses itself, notes reaching a MIDI FX carry
+  no Shift information, and it could not work outside this screen (the
+  instrument's screen, Move's screen).
 
-ノブ（画面表示中）:
+Knobs (while the screen is shown):
 
-| ノブ | パラメータ | 内容 |
+| Knob | Parameter | What it does |
 |---|---|---|
-| 1 | Mutation | 0 = 元MIDIの音そのまま / 50 = 既定 / 100 = 大胆（1目盛り=1） |
-| 2 | Trigger | 画面を閉じている時の動作: `any` / `note` / `learn`（4目盛りで1段） |
-| 3 | Trig Note | 画面を閉じている時の GENERATE ノート（既定36 = Drum Rackの左下PAD） |
-| 4 | Source | `rnd` または 1〜6（4目盛りで1段） |
-| 5 | Animation | `AUTO` / `RIPL` / `SNAK` / `INVD`（4目盛りで1段、パッドのアニメーション） |
+| 1 | Mutation | 0 = the original MIDI's notes as they are / 50 = default / 100 = bold (1 per detent) |
+| 2 | Trigger | Behaviour while the screen is closed: `any` / `note` / `learn` (one step per 4 detents) |
+| 3 | Trig Note | The GENERATE note while the screen is closed (default 36 = the bottom-left pad of a Drum Rack) |
+| 4 | Source | `rnd` or 1–6 (one step per 4 detents) |
+| 5 | Animation | `AUTO` / `RIPL` / `SNAK` / `INVD` (one step per 4 detents; the pad animation) |
 
-ノブに触れると、そのノブの名前と値が大きく表示されます。
-専用画面にしたため、標準ノブ画面の末尾にあった「My Presets / Module」ページはありません（状態は slot の autosave で保存されます）。
+Touching a knob shows its name and value large. Because this is a dedicated
+screen, the "My Presets / Module" pages at the end of the standard knob screen
+are not there (the state is saved by the slot's autosave).
 
-## 7. テスト方法
+## 7. Testing
 
-**PC（自動）**: `scripts/test.sh` — 約145万チェック、ASan/UBSan有効。
+**On the PC (automatic)**: `scripts/test.sh` — about 1.45 million checks, with
+ASan/UBSan.
 
-- Loader: 6本の内容（音高・休符・velocity・長さ）、ランニングステータス/SysEx/Meta/vel0 Note Off、
-  任意区間抽出、切り詰め・ビット反転・ランダムバイト（計数万ケース）でクラッシュしない。
-- Scale: 全128音の量子化がスケール内かつ最近傍、度数移動がスケール内。
-- Generator: 5段階のMutationで計2万回 — 全音がC Phrygian・元ネタ音域内、常に8音（休符なし）、
-  直前/ソースと必ず異なる、Mutation 0で元の音を保持、全ソースが選ばれる。
-  `allow_rests=1` では Mutation 0で完全一致、3音のソースが6音以上にならない。
-- Plugin: PAD 500回押して、生成された全フレーズに REST が無い。
-- Sequencer: ノートオンがグリッドから1ブロック以内、途中で予約したフレーズが次の8ステップ頭で切替、
-  停止で全解放・停止中は無音。乱数ファズ（テンポ変更・停止/再開・巻き戻し・フラッシュ・最大4倍のgate・
-  出力バッファ1〜16）で二重On/孤立Off/stuck noteがゼロ。
-- Plugin API: PAD連打4000回、`note`/`learn`、モード変更中のNote Off、CC123、state往復、
-  `get_beat_position` 無しホストでのMIDIクロック代替。
-- `test_dlopen`: ビルド済み `dsp.so` を chain と同じ手順で読み込み、4秒分再生（On数 = Off数）。
+- Loader: the contents of the six (pitch, rests, velocity, length), running
+  status/SysEx/Meta/vel0 Note Off, extracting any stretch, and no crash on
+  truncation, bit flips or random bytes (tens of thousands of cases in all).
+- Scale: quantising all 128 notes lands inside the scale and on the nearest
+  note; degree moves stay inside the scale.
+- Generator: 20,000 runs over 5 Mutation levels — every note in C Phrygian and
+  inside the sources' range, always 8 notes (no rests), always different from the
+  previous phrase/the source, Mutation 0 keeps the original notes, every source
+  gets chosen. With `allow_rests=1`, Mutation 0 is an exact match and a 3-note
+  source never becomes 6 notes or more.
+- Plugin: 500 pad presses, no REST in any generated phrase.
+- Sequencer: note-ons within one block of the grid, a phrase queued midway
+  switches at the start of the next 8 steps, stop releases everything and it is
+  silent while stopped. A random fuzz (tempo changes, stop/restart, rewinds,
+  flushes, gate up to 4×, output buffer 1–16) gives zero double Ons, orphan Offs
+  or stuck notes.
+- Plugin API: 4000 rapid pad presses, `note`/`learn`, Note Off during a mode
+  change, CC123, state round-trip, the MIDI clock fallback on a host without
+  `get_beat_position`.
+- `test_dlopen`: loads the built `dsp.so` the same way the chain does and plays
+  4 s (On count = Off count).
 
-**生成結果を見る（デバッグログ相当）**:
+**Seeing the generated results (in place of a debug log)**:
 
 ```bash
-build/native/phrase-gen-cli -n 8 -m 50 -s 1                  # 埋め込みの6本
-build/native/phrase-gen-cli -n 8 -m 80 path/to/*.mid          # 任意のMIDIで試す
-build/native/phrase-gen-cli -q -n 500 -m 50                   # 1行表示＋平均
+build/native/phrase-gen-cli -n 8 -m 50 -s 1                  # the embedded six
+build/native/phrase-gen-cli -n 8 -m 80 path/to/*.mid          # try any MIDI files
+build/native/phrase-gen-cli -q -n 500 -m 50                   # one line each + averages
 ```
 
-出力例:
+Example output:
 
 ```
 Source: pattern05.mid
@@ -228,41 +286,47 @@ Step 3: C2 vel=100 len=92%
 ...
 ```
 
-デバイス上の現在のフレーズは `get_param` の `debug` キーで同じ書式を返します
-（chain経由のキー名は `midi_fx1:debug`。PC上では CLI で同じ内容を確認できます）。
+On the device the current phrase comes back in the same format from the `debug`
+key of `get_param` (through the chain the key is `midi_fx1:debug`; on the PC the
+CLI shows the same content).
 
-**Move実機**: 上記6の手順で、(a) Play直後から鳴る、(b) PADごとに違うフレーズ、
-(c) 切替が8ステップの頭、(d) テンポ変更・停止/再開で崩れない、(e) PAD連打・停止で音が残らない、を確認。
+**On a Move**: following step 6 above, check that (a) it sounds right after
+Play, (b) each pad press gives a different phrase, (c) switches land at the start
+of 8 steps, (d) tempo changes and stop/restart do not break it, (e) rapid pad
+presses and stopping leave no hanging notes.
 
-## 8. 元ネタMIDIの差し替え
+## 8. Replacing the source MIDI files
 
-`patterns/` にMIDIを置き、`patterns/patterns.txt` のファイル名を書き換えて再ビルドするだけです
-（1〜16本。`patterns.txt` を消すと `*.mid` を名前順に全部使用）。
-2列目に開始ステップを書くと長いMIDIの任意の8ステップを使えます（例: `riff.mid 16`）。
-ノブ4の Source の選択肢も件数に合わせて自動で更新されます。
+Put MIDI files in `patterns/`, change the file names in `patterns/patterns.txt`
+and rebuild (1–16 files; without `patterns.txt`, every `*.mid` is used in name
+order). A start step in the second column lets you use any 8 steps of a long
+MIDI file (e.g. `riff.mid 16`). The options of knob 4 (Source) follow the file
+count automatically.
 
-## 9. 拡張ポイント（今回は未実装）
+## 9. Extension points (not implemented)
 
-| 機能 | 入れる場所 |
+| Feature | Where it goes |
 |---|---|
-| Density | `stage_rhythm` の目標ノート数（`dmax` / `target`） |
-| Mutation Amount | 実装済み（ノブ1）。全ステージがこの1値でスケール |
-| Octave Range | `gen_ctx_t.lo/hi`（今は元ネタ全体の音域） |
-| Random Seed | `pg_rng_seed()`（生成は決定的。CLIの `-s` と同じ） |
-| Pattern Select | 実装済み（ノブ4 Source） |
-| Scale / Root変更 | `pg_library_init(root, mask)` を作り直すだけ（`PG_ROOT` / `PG_SCALE_MASK`） |
-| 8/16/32 step | `PG_LENGTH`。パターン長は最大32で全モジュールが `length` で動作 |
-| 生成パターンの保存 | `pg_encode_pattern()`（stateに既に保存・復元している） |
-| PADごとに異なるVariation | `pg_pad` が `GENERATE` と一緒にノート番号を返し、`pg_gen_params_t.source` / mutation を変える |
-| Euclidean / Ratchet / Probability | `pg_step_t` にフィールドを追加し、`stage_rhythm` / `fire_step` で解釈 |
-| MIDI CC生成 | `pg_seq_tick` の出力に CC を追加（出力枠は16/ブロック） |
-| Phrase Generator | 生成した8ステップを `pg_pattern_t`（最大32）に連結 |
+| Density | The target note count in `stage_rhythm` (`dmax` / `target`) |
+| Mutation Amount | Done (knob 1). Every stage scales with this one value |
+| Octave Range | `gen_ctx_t.lo/hi` (now the sources' overall range) |
+| Random Seed | `pg_rng_seed()` (generation is deterministic; same as the CLI's `-s`) |
+| Pattern Select | Done (knob 4 Source) |
+| Changing Scale / Root | Just rebuild `pg_library_init(root, mask)` (`PG_ROOT` / `PG_SCALE_MASK`) |
+| 8/16/32 steps | `PG_LENGTH`. Patterns hold up to 32 and every module works from `length` |
+| Saving generated patterns | `pg_encode_pattern()` (already saved and restored in state) |
+| A different variation per pad | `pg_pad` returns the note number with `GENERATE`, changing `pg_gen_params_t.source` / mutation |
+| Euclidean / Ratchet / Probability | Add fields to `pg_step_t` and interpret them in `stage_rhythm` / `fire_step` |
+| MIDI CC generation | Add CCs to the output of `pg_seq_tick` (16 output slots per block) |
+| Phrase Generator | Chain generated 8-step phrases into a `pg_pattern_t` (up to 32) |
 
-## 10. 既知の制限
+## 10. Known limitations
 
-- Phrase Gen を **バイパス（Mute＋Jog Click）または外した瞬間** に鳴っていたノートは、
-  ホストがそれ以降 `tick()` を呼ばないため本モジュールからはNote Offを送れません
-  （内蔵arpも同じ。Schwung本体側の仕様）。Moveを停止してから外すか、
-  必要なら本体の `v2_unload_midi_fx_slot` / bypass時に synth panic を送る修正が必要です。
-- Moveのトラックが同じPADで内蔵音を鳴らすのはMove側の動作です（手順6-1で消音）。
-- ノートオンのタイミング精度はオーディオブロック単位（≈2.9 ms）。
+- Notes sounding **at the moment Phrase Gen is bypassed (Mute + Jog Click) or
+  removed** cannot be sent a Note Off by this module, because the host stops
+  calling `tick()` (the built-in arp is the same; this is how Schwung itself
+  works). Stop Move before removing it, or Schwung's `v2_unload_midi_fx_slot` /
+  bypass would need a change to send a synth panic.
+- A Move track sounding its built-in sound on the same pad is Move's own
+  behaviour (silence it as in step 6-1).
+- Note-on timing is accurate to an audio block (≈2.9 ms).

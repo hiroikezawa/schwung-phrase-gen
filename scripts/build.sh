@@ -29,7 +29,7 @@ SRCS=(pg_scale.c pg_midi_loader.c pg_analyzer.c pg_generator.c pg_sequencer.c
 
 if [[ "${1:-arm64}" == arm64 ]]; then
   python3 "$MODULE/scripts/check_abi.py" "$OUT/dsp.so"
-  cp "$MODULE/LICENSE" "$MODULE/THIRD_PARTY_LICENSES.md" "$MODULE/help.json" "$MODULE/README.md" "$MODULE/ui_chain.js" "$MODULE/ui_core.mjs" "$MODULE/pad_anim.mjs" "$OUT/"
+  cp "$MODULE/LICENSE" "$MODULE/THIRD_PARTY_LICENSES.md" "$MODULE/help.json" "$MODULE/README.md" "$MODULE/README.ja.md" "$MODULE/ui_chain.js" "$MODULE/ui_core.mjs" "$MODULE/pad_anim.mjs" "$OUT/"
   mkdir -p "$OUT/patterns"
   cp "$MODULE"/patterns/*.mid "$MODULE/patterns/patterns.txt" "$OUT/patterns/" 2>/dev/null || true
   tar -czf "$MODULE/dist/phrase-gen-module.tar.gz" -C "$MODULE/dist" phrase-gen
